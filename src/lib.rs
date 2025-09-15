@@ -3,13 +3,51 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use thiserror::Error;
 
+pub struct App {
+    services: Vec<(ServiceId, Rc<Factory>)>,
+}
+
+impl App {
+    pub fn new(services: Vec<(ServiceId, Rc<Factory>)>) -> Self {
+        App { services }
+    }
+
+    pub fn run(&mut self, service_ids: &[ServiceId]) -> anyhow::Result<()> {
+        let mut container = Container::new(&self.services)?;
+        for service_id in service_ids {
+            container.resolve_service(*service_id)?;
+        }
+        let (tx, rx) = channel();
+        ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel"))?;
+        rx.recv()?;
+        Ok(())
+    }
+}
+
 #[derive(Copy, Clone, Eq, Debug, Hash, PartialEq)]
 pub struct ServiceId {
-    pub type_id: TypeId,
-    pub name: Option<&'static str>,
+    type_id: TypeId,
+    name: Option<&'static str>,
+}
+
+impl ServiceId {
+    pub fn of_type<T: 'static>() -> Self {
+        ServiceId {
+            type_id: TypeId::of::<T>(),
+            name: None,
+        }
+    }
+
+    pub fn of_named_type<T: 'static>(name: &'static str) -> Self {
+        ServiceId {
+            type_id: TypeId::of::<T>(),
+            name: Some(name),
+        }
+    }
 }
 
 impl fmt::Display for ServiceId {
@@ -30,6 +68,8 @@ pub type StopAction = Box<dyn FnOnce() + 'static>;
 
 #[derive(Debug, Error)]
 pub enum ResolveError {
+    #[error("duplicate registration: {0}")]
+    DuplicateRegistration(ServiceId),
     #[error("unknown service: {0}")]
     UnknownService(ServiceId),
     #[error("cyclic dependency for: {0}")]
@@ -49,47 +89,49 @@ pub struct Container {
 }
 
 impl Container {
-    pub fn new(services: Vec<(ServiceId, Rc<Factory>)>) -> Self {
-        Container {
-            registered_services: HashMap::from_iter(services),
+    pub fn new<'a>(services: &'a [(ServiceId, Rc<Factory>)]) -> Result<Self, ResolveError> {
+        let mut registered_services = HashMap::new();
+        for (id, f) in services {
+            if registered_services.insert(*id, f.clone()).is_some() {
+                return Err(ResolveError::DuplicateRegistration(*id));
+            }
+        }
+        Ok(Container {
+            registered_services,
             resolved_services: HashMap::new(),
             stop_actions: Vec::new(),
-        }
+        })
     }
 
     pub fn resolve_type<T: 'static + Send + Sync>(&mut self) -> Result<Arc<T>, ResolveError> {
-        let service_id = ServiceId {
-            type_id: TypeId::of::<T>(),
-            name: None,
-        };
-
-        self.resolve(service_id)
+        self.resolve(ServiceId::of_type::<T>())
     }
 
     pub fn resolve_named_type<T: 'static + Send + Sync>(
         &mut self,
         name: &'static str,
     ) -> Result<Arc<T>, ResolveError> {
-        let service_id = ServiceId {
-            type_id: TypeId::of::<T>(),
-            name: Some(name),
-        };
-
-        self.resolve(service_id)
+        self.resolve(ServiceId::of_named_type::<T>(name))
     }
 
     pub fn resolve<T: 'static + Send + Sync>(
         &mut self,
         service_id: ServiceId,
     ) -> Result<Arc<T>, ResolveError> {
-        if let Some(resolved) = self.resolved_services.get(&service_id) {
-            return Ok(resolved
-                .clone()
+        self.resolve_service(service_id).and_then(|service| {
+            service
                 .downcast::<T>()
-                .map_err(|_| ResolveError::TypeMismatch(service_id))?);
-        }
+                .map_err(|_| ResolveError::TypeMismatch(service_id))
+        })
+    }
 
-        DependencyResolver::new(RefCell::new(self)).resolve(service_id)
+    pub fn resolve_service(&mut self, service_id: ServiceId) -> Result<Arc<Service>, ResolveError> {
+        self.resolved_services
+            .get(&service_id)
+            .map(|service| Ok(service.clone()))
+            .unwrap_or_else(|| {
+                DependencyResolver::new(RefCell::new(self)).resolve_service(service_id)
+            })
     }
 }
 
@@ -105,10 +147,7 @@ pub fn supply_value<T>(v: T) -> (ServiceId, Rc<Factory>)
 where
     T: Any + Send + Sync + 'static,
 {
-    let service_id = ServiceId {
-        type_id: TypeId::of::<T>(),
-        name: None,
-    };
+    let service_id = ServiceId::of_type::<T>();
     let factory: Rc<Factory> = to_value_factory(v);
     (service_id, factory)
 }
@@ -117,10 +156,7 @@ pub fn supply_named_value<T>(name: &'static str, v: T) -> (ServiceId, Rc<Factory
 where
     T: Any + Send + Sync + 'static,
 {
-    let service_id = ServiceId {
-        type_id: TypeId::of::<T>(),
-        name: Some(name),
-    };
+    let service_id = ServiceId::of_named_type::<T>(name);
     let factory: Rc<Factory> = to_value_factory(v);
     (service_id, factory)
 }
@@ -130,10 +166,7 @@ where
     T: 'static + Send + Sync,
     F: Fn(&DependencyResolver, &mut Lifecycle) -> anyhow::Result<T> + 'static,
 {
-    let service_id = ServiceId {
-        type_id: TypeId::of::<T>(),
-        name: None,
-    };
+    let service_id = ServiceId::of_type::<T>();
     let factory = to_service_factory(f);
     (service_id, factory)
 }
@@ -143,10 +176,7 @@ where
     T: 'static + Send + Sync,
     F: Fn(&DependencyResolver, &mut Lifecycle) -> anyhow::Result<T> + 'static,
 {
-    let service_id = ServiceId {
-        type_id: TypeId::of::<T>(),
-        name: Some(name),
-    };
+    let service_id = ServiceId::of_named_type::<T>(name);
     let factory = to_service_factory(f);
     (service_id, factory)
 }
@@ -186,11 +216,7 @@ impl<'a> DependencyResolver<'a> {
     }
 
     pub fn resolve_type<T: 'static + Send + Sync>(&self) -> Result<Arc<T>, ResolveError> {
-        let service_id = ServiceId {
-            type_id: TypeId::of::<T>(),
-            name: None,
-        };
-
+        let service_id = ServiceId::of_type::<T>();
         self.resolve(service_id)
     }
 
@@ -198,11 +224,7 @@ impl<'a> DependencyResolver<'a> {
         &self,
         name: &'static str,
     ) -> Result<Arc<T>, ResolveError> {
-        let service_id = ServiceId {
-            type_id: TypeId::of::<T>(),
-            name: Some(name),
-        };
-
+        let service_id = ServiceId::of_named_type::<T>(name);
         self.resolve(service_id)
     }
 
@@ -210,11 +232,16 @@ impl<'a> DependencyResolver<'a> {
         &self,
         service_id: ServiceId,
     ) -> Result<Arc<T>, ResolveError> {
-        if let Some(resolved) = self.container.borrow().resolved_services.get(&service_id) {
-            return Ok(resolved
-                .clone()
+        self.resolve_service(service_id).and_then(|service| {
+            service
                 .downcast::<T>()
-                .map_err(|_| ResolveError::TypeMismatch(service_id))?);
+                .map_err(|_| ResolveError::TypeMismatch(service_id))
+        })
+    }
+
+    pub fn resolve_service(&self, service_id: ServiceId) -> Result<Arc<Service>, ResolveError> {
+        if let Some(resolved) = self.container.borrow().resolved_services.get(&service_id) {
+            return Ok(resolved.clone());
         }
 
         let factory = match self.container.borrow().registered_services.get(&service_id) {
@@ -224,14 +251,14 @@ impl<'a> DependencyResolver<'a> {
 
         let _resolving_guard = ResolvingGuard::new(&self.resolving_services, service_id)?;
 
-        return self.resolve_internal(service_id, factory);
+        self.resolve_internal(service_id, factory)
     }
 
-    fn resolve_internal<T: 'static + Send + Sync>(
+    fn resolve_internal(
         &self,
         service_id: ServiceId,
         factory: Rc<Factory>,
-    ) -> Result<Arc<T>, ResolveError> {
+    ) -> Result<Arc<Service>, ResolveError> {
         let mut start_stop_actions = Vec::new();
         let mut lifecycle = Lifecycle::new(&mut start_stop_actions);
         let service = match factory(self, &mut lifecycle) {
@@ -239,10 +266,10 @@ impl<'a> DependencyResolver<'a> {
             Err(e) => return Err(ResolveError::CreateError(service_id, e)),
         };
 
-        let result = service
-            .clone()
-            .downcast::<T>()
-            .map_err(|_| ResolveError::TypeMismatch(service_id))?;
+        let result = service.clone();
+        if result.as_ref().type_id() != service_id.type_id {
+            return Err(ResolveError::TypeMismatch(service_id));
+        }
 
         if !start_stop_actions.is_empty() {
             let mut performed: Vec<StopAction> = Vec::with_capacity(start_stop_actions.len());
@@ -344,38 +371,8 @@ struct StartStopAction {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Container, provide_service, supply_value};
-    use std::sync::Arc;
-
-    struct ServiceA {}
-    struct ServiceB {}
-    struct ServiceC {
-        service_a: Arc<ServiceA>,
-        service_b: Arc<ServiceB>,
-    }
-
     #[test]
     fn it_works() -> anyhow::Result<()> {
-        let mut container = Container::new(vec![
-            supply_value(ServiceA {}),
-            supply_value(ServiceB {}),
-            provide_service(|r, lc| {
-                let service_c = ServiceC {
-                    service_a: r.resolve_type::<ServiceA>()?,
-                    service_b: r.resolve_type::<ServiceB>()?,
-                };
-                lc.register_start_stop(
-                    || {
-                        println!("Started!");
-                        Ok(())
-                    },
-                    || println!("Stopped!"),
-                );
-                Ok(service_c)
-            }),
-        ]);
-        let service_c = container.resolve_type::<ServiceC>()?;
-        drop(service_c);
         Ok(())
     }
 }

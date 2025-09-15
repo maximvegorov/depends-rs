@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.99"
 thiserror = "2.0.16"
+ctrlc = "3.5.0"
