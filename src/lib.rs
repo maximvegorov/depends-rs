@@ -89,7 +89,7 @@ pub struct Container {
 }
 
 impl Container {
-    pub fn new<'a>(services: &'a [(ServiceId, Rc<Factory>)]) -> Result<Self, ResolveError> {
+    pub fn new(services: &[(ServiceId, Rc<Factory>)]) -> Result<Self, ResolveError> {
         let mut registered_services = HashMap::new();
         for (id, f) in services {
             if registered_services.insert(*id, f.clone()).is_some() {
