@@ -2,6 +2,12 @@ use depends_rs::{provide_service, supply_value, App, ServiceId};
 use std::sync::Arc;
 
 fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default()
+        .default_filter_or("info"))
+        .format_timestamp_secs()
+        .format_target(true)
+        .init();
+
     let mut app = App::new(vec![
         supply_value(ServiceA {}),
         supply_value(ServiceB {}),

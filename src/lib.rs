@@ -1,10 +1,12 @@
+use anyhow::{anyhow};
+use log::{debug, info};
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
-use std::sync::mpsc::channel;
 use std::sync::Arc;
+use std::sync::mpsc::channel;
 use thiserror::Error;
 
 pub struct App {
@@ -17,12 +19,23 @@ impl App {
     }
 
     pub fn run(&mut self, service_ids: &[ServiceId]) -> anyhow::Result<()> {
+        info!("Running app (services: {service_ids:?})");
+        self.do_run(service_ids)
+            .map_err(|e| anyhow!("Error running app: {}", e))?;
+        info!("App was stopped");
+        Ok(())
+    }
+
+    fn do_run(&mut self, service_ids: &[ServiceId]) -> anyhow::Result<()> {
+        info!("Building container");
         let mut container = Container::new(&self.services)?;
         for service_id in service_ids {
             container.resolve_service(*service_id)?;
         }
+        info!("Setting termination handler");
         let (tx, rx) = channel();
         ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel"))?;
+        info!("Awaiting termination");
         rx.recv()?;
         Ok(())
     }
@@ -126,6 +139,7 @@ impl Container {
     }
 
     pub fn resolve_service(&mut self, service_id: ServiceId) -> Result<Arc<Service>, ResolveError> {
+        info!("Resolving service by container {service_id:?}");
         self.resolved_services
             .get(&service_id)
             .map(|service| Ok(service.clone()))
@@ -137,9 +151,11 @@ impl Container {
 
 impl Drop for Container {
     fn drop(&mut self) {
+        info!("Stopping container");
         while let Some(stop) = self.stop_actions.pop() {
             stop();
         }
+        info!("Container was stopped");
     }
 }
 
@@ -240,6 +256,8 @@ impl<'a> DependencyResolver<'a> {
     }
 
     pub fn resolve_service(&self, service_id: ServiceId) -> Result<Arc<Service>, ResolveError> {
+        info!("Resolving service by resolver {service_id:?}");
+
         if let Some(resolved) = self.container.borrow().resolved_services.get(&service_id) {
             return Ok(resolved.clone());
         }
@@ -330,12 +348,15 @@ pub struct Lifecycle<'a> {
     actions: &'a mut Vec<StartStopAction>,
 }
 
+const LIFECYCLE_LOG: &str = "lifecycle";
+
 impl<'a> Lifecycle<'a> {
     fn new(actions: &'a mut Vec<StartStopAction>) -> Self {
         Lifecycle { actions }
     }
 
     pub fn register_start<F: FnOnce() -> anyhow::Result<()> + 'static>(&mut self, start_action: F) {
+        debug!(target: LIFECYCLE_LOG, "Registering start action");
         self.actions.push(StartStopAction {
             start_action: Some(Box::new(start_action)),
             stop_action: None,
@@ -343,6 +364,7 @@ impl<'a> Lifecycle<'a> {
     }
 
     pub fn register_stop<F: FnOnce() + 'static>(&mut self, stop_action: F) {
+        debug!(target: LIFECYCLE_LOG, "Registering stop action");
         self.actions.push(StartStopAction {
             start_action: None,
             stop_action: Some(Box::new(stop_action)),
@@ -357,6 +379,7 @@ impl<'a> Lifecycle<'a> {
         start_action: F1,
         stop_action: F2,
     ) {
+        debug!(target: LIFECYCLE_LOG, "Registering start and stop actions");
         self.actions.push(StartStopAction {
             start_action: Some(Box::new(start_action)),
             stop_action: Some(Box::new(stop_action)),
