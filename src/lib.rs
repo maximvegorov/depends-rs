@@ -81,8 +81,8 @@ pub type StopAction = Box<dyn FnOnce() + 'static>;
 
 #[derive(Debug, Error)]
 pub enum ResolveError {
-    #[error("duplicate registration: {0}")]
-    DuplicateRegistration(ServiceId),
+    #[error("duplicated registration: {0}")]
+    DuplicatedRegistration(ServiceId),
     #[error("unknown service: {0}")]
     UnknownService(ServiceId),
     #[error("cyclic dependency for: {0}")]
@@ -98,7 +98,7 @@ pub enum ResolveError {
 pub struct Container {
     registered_services: HashMap<ServiceId, Rc<Factory>>,
     resolved_services: HashMap<ServiceId, Arc<Service>>,
-    stop_actions: Vec<StopAction>,
+    close_actions: Vec<StopAction>,
 }
 
 impl Container {
@@ -106,13 +106,13 @@ impl Container {
         let mut registered_services = HashMap::new();
         for (id, f) in services {
             if registered_services.insert(*id, f.clone()).is_some() {
-                return Err(ResolveError::DuplicateRegistration(*id));
+                return Err(ResolveError::DuplicatedRegistration(*id));
             }
         }
         Ok(Container {
             registered_services,
             resolved_services: HashMap::new(),
-            stop_actions: Vec::new(),
+            close_actions: Vec::new(),
         })
     }
 
@@ -152,7 +152,7 @@ impl Container {
 impl Drop for Container {
     fn drop(&mut self) {
         info!("Stopping container");
-        while let Some(stop) = self.stop_actions.pop() {
+        while let Some(stop) = self.close_actions.pop() {
             stop();
         }
         info!("Container was stopped");
@@ -308,7 +308,7 @@ impl<'a> DependencyResolver<'a> {
 
             self.container
                 .borrow_mut()
-                .stop_actions
+                .close_actions
                 .append(&mut performed);
         }
 
