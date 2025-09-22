@@ -4,12 +4,15 @@ use depends_rs::provider::{supply_trait_object, ServiceId};
 use std::rc::Rc;
 
 fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .format_timestamp_secs()
-        .format_target(true)
-        .init();
+    init_logger();
 
-    let app = App::new(vec![
+    let app = build_app();
+
+    app.run(&[ServiceId::of_type::<ServiceC>()])
+}
+
+fn build_app() -> App {
+    App::new(vec![
         supply_trait_object(Rc::new(ServiceA {}) as Rc<dyn TraitA>),
         supply_trait_object(Rc::new(ServiceB {}) as Rc<dyn TraitB>),
         provide_service(|r, lc| {
@@ -29,9 +32,14 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(Rc::new(service_c))
         }),
-    ]);
-    app.run(&[ServiceId::of_type::<ServiceC>()])?;
-    Ok(())
+    ])
+}
+
+fn init_logger() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format_timestamp_secs()
+        .format_target(true)
+        .init();
 }
 
 trait TraitA {}
