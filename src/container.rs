@@ -1,6 +1,7 @@
 use crate::provider::{Factory, Provider, Service, ServiceId};
 use log::{debug, error, info};
 use scopeguard::defer;
+use std::any::TypeId;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -32,6 +33,7 @@ pub enum ResolveError {
 
 pub struct Container {
     registered_services: HashMap<ServiceId, Rc<Factory>>,
+    registered_types:  HashMap<TypeId, Rc<Vec<ServiceId>>>,
     resolved_services: HashMap<ServiceId, Rc<Service>>,
     close_actions: Vec<StopAction>,
 }
@@ -39,6 +41,7 @@ pub struct Container {
 impl Container {
     pub fn new(providers: &[Provider]) -> Result<Self, ResolveError> {
         let mut registered_services = HashMap::new();
+        let mut registered_types = HashMap::new();
         for provider in providers {
             let service_id = provider.service_id;
             if registered_services
@@ -47,12 +50,28 @@ impl Container {
             {
                 return Err(ResolveError::DuplicatedRegistration(service_id));
             }
+            let entry = registered_types
+                .entry(service_id.type_id)
+                .or_insert_with(|| Rc::new(Vec::new()));
+            Rc::make_mut(entry).push(service_id);
         }
         Ok(Container {
             registered_services,
+            registered_types,
             resolved_services: HashMap::new(),
             close_actions: Vec::new(),
         })
+    }
+
+    pub fn resolve_types<T: 'static>(&mut self) -> Result<Vec<Rc<T>>, ResolveError> {
+        let mut result = Vec::new();
+        if let Some(service_ids) = self.registered_types.get(&TypeId::of::<T>()) {
+            result.reserve(service_ids.len());
+            for service_id in service_ids.clone().iter() {
+                result.push(self.resolve_service::<T>(*service_id)?);
+            }
+        }
+        Ok(result)
     }
 
     pub fn resolve_type<T: 'static>(&mut self) -> Result<Rc<T>, ResolveError> {
@@ -66,11 +85,24 @@ impl Container {
         self.resolve_service(ServiceId::of_named_type::<T>(name))
     }
 
-    pub fn resolve_service<T: 'static>(
+    fn resolve_service<T: 'static>(
         &mut self,
         service_id: ServiceId,
     ) -> Result<Rc<T>, ResolveError> {
         downcast_service(service_id, self.resolve(service_id))
+    }
+
+    pub fn resolve_trait_objects<T: ?Sized + 'static>(
+        &mut self,
+    ) -> Result<Vec<Rc<T>>, ResolveError> {
+        let mut result = Vec::new();
+        if let Some(service_ids) = self.registered_types.get(&TypeId::of::<Rc<T>>()) {
+            result.reserve(service_ids.len());
+            for service_id in service_ids.clone().iter() {
+                result.push(self.resolve_trait_object_service::<T>(*service_id)?);
+            }
+        }
+        Ok(result)
     }
 
     pub fn resolve_trait_object<T: ?Sized + 'static>(&mut self) -> Result<Rc<T>, ResolveError> {
@@ -84,7 +116,7 @@ impl Container {
         self.resolve_trait_object_service(ServiceId::of_named_type::<Rc<T>>(name))
     }
 
-    pub fn resolve_trait_object_service<T: ?Sized + 'static>(
+    fn resolve_trait_object_service<T: ?Sized + 'static>(
         &mut self,
         service_id: ServiceId,
     ) -> Result<Rc<T>, ResolveError> {
@@ -134,7 +166,7 @@ impl<'a> DependencyResolver<'a> {
         self.resolve_service(service_id)
     }
 
-    pub fn resolve_service<T: 'static>(
+    fn resolve_service<T: 'static>(
         &self,
         service_id: ServiceId,
     ) -> Result<Rc<T>, ResolveError> {
@@ -152,7 +184,7 @@ impl<'a> DependencyResolver<'a> {
         self.resolve_trait_object_service(ServiceId::of_named_type::<Rc<T>>(name))
     }
 
-    pub fn resolve_trait_object_service<T: ?Sized + 'static>(
+    fn resolve_trait_object_service<T: ?Sized + 'static>(
         &self,
         service_id: ServiceId,
     ) -> Result<Rc<T>, ResolveError> {
