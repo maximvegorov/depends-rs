@@ -1,6 +1,6 @@
-use depends_rs::app::App;
-use depends_rs::provider::provide_service;
-use depends_rs::provider::{supply_trait_object, ServiceId};
+use depends::app::App;
+use depends::provider::provide_service;
+use depends::provider::{supply_trait_object, ServiceId};
 use std::rc::Rc;
 
 fn main() -> anyhow::Result<()> {

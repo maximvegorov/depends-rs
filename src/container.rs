@@ -53,7 +53,8 @@ impl Container {
             let entry = registered_types
                 .entry(service_id.type_id)
                 .or_insert_with(|| Rc::new(Vec::new()));
-            Rc::make_mut(entry).push(service_id);
+            Rc::get_mut(entry).unwrap()
+                .push(service_id);
         }
         Ok(Container {
             registered_services,
