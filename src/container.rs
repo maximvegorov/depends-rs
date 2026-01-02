@@ -333,11 +333,3 @@ fn downcast_trait_object_service<T: ?Sized + 'static>(
         })
         .map(|service| service.as_ref().clone())
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() -> anyhow::Result<()> {
-        Ok(())
-    }
-}
